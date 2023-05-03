@@ -106,7 +106,7 @@ void wait_for_signal(int pid, int sig) {
 }
 
 
-#ifdef __x86_64__
+#if defined(__x86_64__)
 bool ptrace_get_regs(int pid, struct user_regs_struct &regs) {
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
         perror("get regs");
@@ -154,7 +154,7 @@ bool make_call(int pid, void* addr, struct user_regs_struct &regs, void** result
     auto orig_rip = regs.rip;
     long instruction = ptrace(PTRACE_PEEKTEXT, pid, orig_rip, nullptr);
     print("rip=%p instruction: %lx", (void*) orig_rip, instruction);
-    if (ptrace(PTRACE_POKETEXT, pid, regs.rip, 0xccd0ff) == -1) {
+    if (ptrace(PTRACE_POKETEXT, pid, regs.rip, 0xccd0ff) == -1) { // call *%rax; int 3
         perror("replace code");
         return false;
     }
@@ -283,6 +283,156 @@ void dump_regs(int pid) {
     }
 }
 
+#elif defined(__aarch64__)
+#define NT_PRSTATUS 1
+
+bool ptrace_get_regs(int pid, struct user_regs_struct &regs) {
+    struct iovec iov = {
+        .iov_base = &regs,
+        .iov_len = sizeof(struct user_regs_struct),
+    };
+    if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) == -1) {
+        perror("get regs");
+        return false;
+    }
+    return true;
+}
+
+bool ptrace_set_regs(int pid, const struct user_regs_struct &regs) {
+    struct iovec iov = {
+        .iov_base = (void*) &regs,
+        .iov_len = sizeof(struct user_regs_struct),
+    };
+    if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov) == -1) {
+        perror("set regs");
+        return false;
+    }
+    return true;
+}
+
+bool stack_push_str(
+        int pid,
+        struct user_regs_struct &regs,
+        const char *str,
+        size_t size,
+        void* &addr
+) {
+    size++;
+    print("sp=%p", (void*) regs.sp);
+    regs.sp -= size;
+    struct iovec local{
+            .iov_base = (void*) str,
+            .iov_len = size
+    }, remote{
+            .iov_base = (void*) regs.sp,
+            .iov_len = size
+    };
+    if (process_vm_writev(pid, &local, 1, &remote, 1, 0) == -1) {
+        print("failed to write to remote %p from %p size=%ld", (void*) regs.sp, str, size);
+        perror("stack push str");
+        return false;
+    }
+    addr = (void*) regs.sp;
+    print("string pushed to %p (size=%ld)", addr, size);
+    return true;
+}
+
+bool make_call(int pid, void* addr, struct user_regs_struct &regs, void** result) {
+    auto orig_pc = regs.pc;
+    long instruction = ptrace(PTRACE_PEEKTEXT, pid, orig_pc, nullptr);
+    print("pc=%p instruction: %lx", (void*) orig_pc, instruction);
+    if (ptrace(PTRACE_POKETEXT, pid, regs.pc, 0xd4200020d63f0120) == -1) { // blr x9; brk #0x1
+        perror("replace code");
+        return false;
+    }
+    regs.sp = regs.sp & (~0xf);
+    regs.regs[9] = (unsigned long long) addr;
+    if (!ptrace_set_regs(pid, regs)) {
+        perror("set regs for call");
+        return false;
+    }
+    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
+        perror("continue for call");
+        return false;
+    }
+    wait_for_signal(pid, SIGTRAP);
+    if (!ptrace_get_regs(pid, regs)) {
+        perror("get regs post call");
+        return false;
+    }
+    if (regs.pc != orig_pc + 4) {
+        print("break on wrong position pc=%lx", regs.pc);
+        return false;
+    }
+    if (ptrace(PTRACE_POKETEXT, pid, orig_pc, instruction) == -1) {
+        perror("restore code");
+        return false;
+    }
+    if (result != nullptr)
+        *result = (void*) regs.regs[0];
+    return true;
+}
+
+bool put_arg(int pid, struct user_regs_struct &regs, int pos, void* arg) {
+    if (pos >= 1 && pos <= 8) {
+        regs.regs[pos - 1] = (unsigned long long) arg;
+        return true;
+    }
+    return false;
+}
+
+bool put_syscall_arg(int pid, struct user_regs_struct &regs, int pos, void* arg) {
+    if (pos >= 1 && pos <= 6) {
+        regs.regs[pos - 1] = (unsigned long long) arg;
+        return true;
+    }
+    return false;
+}
+
+bool make_syscall(int pid, int nr, struct user_regs_struct &regs, void** result) {
+    auto orig_pc = regs.pc;
+    long instruction = ptrace(PTRACE_PEEKTEXT, pid, orig_pc, nullptr);
+    print("pc=%p instruction: %lx", (void*) orig_pc, instruction);
+    if (ptrace(PTRACE_POKETEXT, pid, regs.pc, 0xd4000001) == -1) { // svc 0
+        perror("replace code");
+        return false;
+    }
+    regs.sp = regs.sp & (~0xf);
+    regs.regs[8] = (unsigned long long) nr;
+    if (!ptrace_set_regs(pid, regs)) {
+        perror("set regs for call");
+        return false;
+    }
+    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1) {
+        perror("continue for call");
+        return false;
+    }
+    wait_for_signal(pid, SIGTRAP);
+    if (!ptrace_get_regs(pid, regs)) {
+        perror("get regs post call");
+        return false;
+    }
+    if (regs.pc != orig_pc + 4) {
+        print("break on wrong position pc=%lx", regs.pc);
+        return false;
+    }
+    if (ptrace(PTRACE_POKETEXT, pid, orig_pc, instruction) == -1) {
+        perror("restore code");
+        return false;
+    }
+    if (result != nullptr)
+        *result = (void*) regs.regs[0];
+    return true;
+}
+
+void dump_regs(int pid) {
+    struct user_regs_struct regs{};
+    if (!ptrace_get_regs(pid, regs)) {
+        perror("failed to get regs for dump");
+    } else {
+        print("current sp=%p, pc=%p", (void *) regs.sp, (void *) regs.pc);
+    }
+}
 
 #else
 bool ptrace_get_regs(int pid, struct user_regs_struct &regs) NOT_IMPLEMENTED
