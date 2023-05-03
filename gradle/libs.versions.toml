@@ -1,0 +1,12 @@
+[versions]
+com-android-application = "8.1.0-alpha11"
+cxx = "1.2.0"
+
+[libraries]
+cxx = { module = "dev.rikka.ndk.thirdparty:cxx", version.ref = "cxx" }
+
+[plugins]
+com-android-application = { id = "com.android.application", version.ref = "com-android-application" }
+
+[bundles]
+
