@@ -7,6 +7,8 @@
 #include <sys/ptrace.h>
 #include <dlfcn.h>
 #include <sys/wait.h>
+#include <syscall.h>
+#include <sys/prctl.h>
 
 #include "elf_util.h"
 #include "pmparser.h"
@@ -90,34 +92,121 @@ void remote_dlclose(int pid, void *handle) {
     }
 }
 
+void remote_get_dumpable(int pid) {
+    print("get dumpable for %d", pid);
+    struct user_regs_struct regs{}, regs_backup{};
+    if (!ptrace_get_regs(pid, regs)) return;
+    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
+    put_syscall_arg(pid, regs, 1, (void*) PR_GET_DUMPABLE);
+    put_syscall_arg(pid, regs, 2, nullptr);
+    put_syscall_arg(pid, regs, 3, nullptr);
+    put_syscall_arg(pid, regs, 4, nullptr);
+    put_syscall_arg(pid, regs, 5, nullptr);
+    void* result;
+    if (!make_syscall(pid, SYS_prctl, regs, &result)) {
+        print("failed to prctl");
+    }
+    print("dumpable:%p", result);
+    if (!ptrace_set_regs(pid, regs_backup)) {
+        print("failed to restore regs");
+    }
+}
+
+void remote_set_dumpable(int pid, int dumpable) {
+    print("set dumpable to %d for %d", dumpable, pid);
+    struct user_regs_struct regs{}, regs_backup{};
+    if (!ptrace_get_regs(pid, regs)) return;
+    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
+    put_syscall_arg(pid, regs, 1, (void*) PR_SET_DUMPABLE);
+    put_syscall_arg(pid, regs, 2, (void*) dumpable);
+    put_syscall_arg(pid, regs, 3, nullptr);
+    put_syscall_arg(pid, regs, 4, nullptr);
+    put_syscall_arg(pid, regs, 5, nullptr);
+    void* result;
+    if (!make_syscall(pid, SYS_prctl, regs, &result)) {
+        print("failed to prctl");
+    }
+    print("result:%p", result);
+    if (!ptrace_set_regs(pid, regs_backup)) {
+        print("failed to restore regs");
+    }
+}
+
 void print_usage() {
-    print("usage:\n  open <pid> <path>\n  close <pid> <handle>");
+    print("usage:");
+    print("  open <pid> <path>");
+    print("  close <pid> <handle>");
+    print("  get-dumpable <pid>");
+    print("  set-dumpable <pid> <dumpable>");
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
+    if (argc < 2) {
         print_usage();
         return 1;
     }
     if (argv[1] == "open"sv) {
+        if (argc != 4) {
+            print_usage();
+            return 1;
+        }
         auto pid = (int) strtol(argv[2], nullptr, 0);
         if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
             perror("attach");
             return 1;
         }
+        wait_for_signal(pid, SIGSTOP);
         remote_dlopen(pid, argv[3]);
         if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
             perror("detach");
             return 1;
         }
     } else if (argv[1] == "close"sv) {
+        if (argc != 4) {
+            print_usage();
+            return 1;
+        }
         auto pid = (int) strtol(argv[2], nullptr, 0);
-        auto handle = (void*) strtoul(argv[3], nullptr, 0);
+        auto handle = (void *) strtoul(argv[3], nullptr, 0);
         if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
             perror("attach");
             return 1;
         }
+        wait_for_signal(pid, SIGSTOP);
         remote_dlclose(pid, handle);
+        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
+            perror("detach");
+            return 1;
+        }
+    } else if (argv[1] == "get-dumpable"sv) {
+        if (argc != 3) {
+            print_usage();
+            return 1;
+        }
+        auto pid = (int) strtol(argv[2], nullptr, 0);
+        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
+            perror("attach");
+            return 1;
+        }
+        wait_for_signal(pid, SIGSTOP);
+        remote_get_dumpable(pid);
+        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
+            perror("detach");
+            return 1;
+        }
+    }  else if (argv[1] == "set-dumpable"sv) {
+        if (argc != 4) {
+            print_usage();
+            return 1;
+        }
+        auto pid = (int) strtol(argv[2], nullptr, 0);
+        auto dumpable = (int) strtol(argv[3], nullptr, 0);
+        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
+            perror("attach");
+            return 1;
+        }
+        wait_for_signal(pid, SIGSTOP);
+        remote_set_dumpable(pid, dumpable);
         if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
             perror("detach");
             return 1;
