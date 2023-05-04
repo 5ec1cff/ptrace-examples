@@ -42,7 +42,7 @@ public:
     bool set_regs(struct user_regs_struct &new_regs);
     bool set_regs();
     bool make_syscall(int nr, void** result);
-    void dump_regs() const;
+    void dump_regs();
     void backup_regs() {
         regs_backup_ = regs_;
     }

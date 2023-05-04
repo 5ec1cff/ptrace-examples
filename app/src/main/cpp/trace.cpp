@@ -255,9 +255,8 @@ bool TracedProcess::make_syscall(int nr, void** result) {
     return true;
 }
 
-void TracedProcess::dump_regs() const {
-    struct user_regs_struct regs{};
-    if (!ptrace_get_regs(pid_, regs)) {
+void TracedProcess::dump_regs()  {
+    if (!get_regs()) {
         perror("failed to get regs for dump");
     } else {
         print("current sp=%p, pc=%p", (void *) regs_.REG_SP, (void *) regs_.REG_IP);

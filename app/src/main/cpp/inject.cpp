@@ -14,6 +14,7 @@
 #include "pmparser.h"
 #include "ptrace_utils.h"
 #include "logging.h"
+#include "trace.h"
 
 using namespace std::literals::string_view_literals;
 
@@ -40,8 +41,12 @@ bool find_linker(int pid, void* &base, std::string &path) {
 
 void remote_dlopen(int pid, const std::string_view path) {
     print("dlopen %s on %d\n", path.data(), pid);
+    TracedProcess proc{};
     void* linker_base;
-    struct user_regs_struct regs{}, regs_backup{};
+    if (!proc.attach_and_wait(pid)) {
+        print("failed to wait");
+        return;
+    }
     std::string linker_path;
     if (!find_linker(pid, linker_base, linker_path)) {
         print("failed to find linker");
@@ -50,27 +55,35 @@ void remote_dlopen(int pid, const std::string_view path) {
     SandHook::ElfImg elfImg{linker_path, linker_base};
     auto dlopen_addr = elfImg.getSymbAddress("__loader_dlopen");
     print("dlopen_addr: %p", dlopen_addr);
-    if (!ptrace_get_regs(pid, regs)) return;
-    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
+    if (!proc.get_regs()) return;
+    proc.backup_regs();
     void* str_addr = nullptr;
-    if (!stack_push_str(pid, regs, path.data(), path.size(), str_addr)) return;
-    put_arg(pid, regs, 1, str_addr);
-    put_arg(pid, regs, 2, (void*) RTLD_NOW);
-    put_arg(pid, regs, 3, nullptr);
+    if (!proc.stack_push_str(path, str_addr)) return;
+    proc.put_arg(1, str_addr);
+    proc.put_arg(2, (void*) RTLD_NOW);
+    proc.put_arg(3, nullptr);
     void* result = nullptr;
-    if (!make_call(pid, dlopen_addr, regs, &result)) {
+    if (!proc.make_call(dlopen_addr, &result)) {
         print("call dlopen failed");
         return;
     }
     print("handle: %p", result);
-    if (!ptrace_set_regs(pid, regs_backup)) {
+    proc.restore_regs();
+    if (!proc.set_regs()) {
         print("failed to restore regs");
+    }
+    if (!proc.detach()) {
+        print("failed to detach");
     }
 }
 
 void remote_dlclose(int pid, void *handle) {
     print("dlclose %p on %d\n", handle, pid);void* linker_base;
-    struct user_regs_struct regs{}, regs_backup{};
+    TracedProcess proc{};
+    if (!proc.attach_and_wait(pid)) {
+        print("failed to wait");
+        return;
+    }
     std::string linker_path;
     if (!find_linker(pid, linker_base, linker_path)) {
         print("failed to find linker");
@@ -79,56 +92,76 @@ void remote_dlclose(int pid, void *handle) {
     SandHook::ElfImg elfImg{linker_path, linker_base};
     auto dlclose_addr = elfImg.getSymbAddress("__loader_dlclose");
     print("dlclose_addr: %p", dlclose_addr);
-    if (!ptrace_get_regs(pid, regs)) return;
-    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
-    put_arg(pid, regs, 1, handle);
-    put_arg(pid, regs, 2, nullptr);
-    if (!make_call(pid, dlclose_addr, regs, nullptr)) {
+    if (!proc.get_regs()) return;
+    proc.backup_regs();
+    proc.put_arg(1, handle);
+    proc.put_arg(2, nullptr);
+    if (!proc.make_call(dlclose_addr, nullptr)) {
         print("call dlclose failed");
         return;
     }
-    if (!ptrace_set_regs(pid, regs_backup)) {
+    proc.restore_regs();
+    if (!proc.set_regs()) {
         print("failed to restore regs");
+    }
+    if (!proc.detach()) {
+        print("failed to detach");
     }
 }
 
 void remote_get_dumpable(int pid) {
     print("get dumpable for %d", pid);
-    struct user_regs_struct regs{}, regs_backup{};
-    if (!ptrace_get_regs(pid, regs)) return;
-    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
-    put_syscall_arg(pid, regs, 1, (void*) PR_GET_DUMPABLE);
-    put_syscall_arg(pid, regs, 2, nullptr);
-    put_syscall_arg(pid, regs, 3, nullptr);
-    put_syscall_arg(pid, regs, 4, nullptr);
-    put_syscall_arg(pid, regs, 5, nullptr);
+    TracedProcess proc{};
+    if (!proc.attach_and_wait(pid)) {
+        print("failed to wait");
+        return;
+    }
+    if (!proc.get_regs()) return;
+    proc.backup_regs();
+    proc.put_syscall_arg(1, (void*) PR_GET_DUMPABLE);
+    proc.put_syscall_arg(2, nullptr);
+    proc.put_syscall_arg(3, nullptr);
+    proc.put_syscall_arg(4, nullptr);
+    proc.put_syscall_arg(5, nullptr);
     void* result;
-    if (!make_syscall(pid, SYS_prctl, regs, &result)) {
+    if (!proc.make_syscall(SYS_prctl, &result)) {
         print("failed to prctl");
     }
     print("dumpable:%p", result);
-    if (!ptrace_set_regs(pid, regs_backup)) {
+    proc.restore_regs();
+    if (!proc.set_regs()) {
         print("failed to restore regs");
+    }
+    if (!proc.detach()) {
+        print("failed to detach");
     }
 }
 
 void remote_set_dumpable(int pid, int dumpable) {
     print("set dumpable to %d for %d", dumpable, pid);
-    struct user_regs_struct regs{}, regs_backup{};
-    if (!ptrace_get_regs(pid, regs)) return;
-    memcpy(&regs_backup, &regs, sizeof(struct user_regs_struct));
-    put_syscall_arg(pid, regs, 1, (void*) PR_SET_DUMPABLE);
-    put_syscall_arg(pid, regs, 2, (void*) dumpable);
-    put_syscall_arg(pid, regs, 3, nullptr);
-    put_syscall_arg(pid, regs, 4, nullptr);
-    put_syscall_arg(pid, regs, 5, nullptr);
+    TracedProcess proc{};
+    if (!proc.attach_and_wait(pid)) {
+        print("failed to wait");
+        return;
+    }
+    if (!proc.get_regs()) return;
+    proc.backup_regs();
+    proc.put_syscall_arg(1, (void*) PR_SET_DUMPABLE);
+    proc.put_syscall_arg(2, (void*) dumpable);
+    proc.put_syscall_arg(3, nullptr);
+    proc.put_syscall_arg(4, nullptr);
+    proc.put_syscall_arg(5, nullptr);
     void* result;
-    if (!make_syscall(pid, SYS_prctl, regs, &result)) {
+    if (!proc.make_syscall(SYS_prctl, &result)) {
         print("failed to prctl");
     }
     print("result:%p", result);
-    if (!ptrace_set_regs(pid, regs_backup)) {
+    proc.restore_regs();
+    if (!proc.set_regs()) {
         print("failed to restore regs");
+    }
+    if (!proc.detach()) {
+        print("failed to detach");
     }
 }
 
@@ -151,16 +184,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         auto pid = (int) strtol(argv[2], nullptr, 0);
-        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-            perror("attach");
-            return 1;
-        }
-        wait_for_signal(pid, SIGSTOP);
         remote_dlopen(pid, argv[3]);
-        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-            perror("detach");
-            return 1;
-        }
     } else if (argv[1] == "close"sv) {
         if (argc != 4) {
             print_usage();
@@ -168,32 +192,14 @@ int main(int argc, char **argv) {
         }
         auto pid = (int) strtol(argv[2], nullptr, 0);
         auto handle = (void *) strtoul(argv[3], nullptr, 0);
-        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-            perror("attach");
-            return 1;
-        }
-        wait_for_signal(pid, SIGSTOP);
         remote_dlclose(pid, handle);
-        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-            perror("detach");
-            return 1;
-        }
     } else if (argv[1] == "get-dumpable"sv) {
         if (argc != 3) {
             print_usage();
             return 1;
         }
         auto pid = (int) strtol(argv[2], nullptr, 0);
-        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-            perror("attach");
-            return 1;
-        }
-        wait_for_signal(pid, SIGSTOP);
         remote_get_dumpable(pid);
-        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-            perror("detach");
-            return 1;
-        }
     }  else if (argv[1] == "set-dumpable"sv) {
         if (argc != 4) {
             print_usage();
@@ -201,16 +207,7 @@ int main(int argc, char **argv) {
         }
         auto pid = (int) strtol(argv[2], nullptr, 0);
         auto dumpable = (int) strtol(argv[3], nullptr, 0);
-        if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
-            perror("attach");
-            return 1;
-        }
-        wait_for_signal(pid, SIGSTOP);
         remote_set_dumpable(pid, dumpable);
-        if (ptrace(PTRACE_DETACH, pid, 0, 0) == -1) {
-            perror("detach");
-            return 1;
-        }
     } else {
         print_usage();
         return 1;
