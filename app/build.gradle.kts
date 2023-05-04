@@ -31,6 +31,7 @@ android {
                 cppFlags("-std=c++20", *flags)
                 cFlags("-std=c18", *flags)
                 arguments += "-DANDROID_STL=none"
+                abiFilters("x86_64", "arm64-v8a")
             }
         }
     }
