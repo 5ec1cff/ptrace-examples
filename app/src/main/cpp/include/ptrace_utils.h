@@ -12,6 +12,9 @@
 
 #ifdef __arm__
 #define user_regs_struct user_regs
+#define ARM_IS_THUMB(regs) (((regs).ARM_cpsr & (1 << 5)) != 0)
+// #define ARM_SET_THUMB(regs) ((regs).ARM_cpsr |= (1 << 5))
+// #define ARM_UNSET_THUMB(regs) ((regs).ARM_cpsr &= ~(1 << 5))
 #endif
 
 void dump_siginfo(int pid);

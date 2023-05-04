@@ -173,6 +173,13 @@ void print_usage() {
     print("  set-dumpable <pid> <dumpable>");
 }
 
+extern "C" void do_loop() {
+    int i = 0;
+    for (;;) {
+        i++;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         print_usage();
@@ -200,7 +207,7 @@ int main(int argc, char **argv) {
         }
         auto pid = (int) strtol(argv[2], nullptr, 0);
         remote_get_dumpable(pid);
-    }  else if (argv[1] == "set-dumpable"sv) {
+    } else if (argv[1] == "set-dumpable"sv) {
         if (argc != 4) {
             print_usage();
             return 1;
@@ -208,6 +215,26 @@ int main(int argc, char **argv) {
         auto pid = (int) strtol(argv[2], nullptr, 0);
         auto dumpable = (int) strtol(argv[3], nullptr, 0);
         remote_set_dumpable(pid, dumpable);
+        /// === for debug === ///
+    } else if (argv[1] == "pause"sv) {
+        print("pid=%d paused...", getpid());
+        pause();
+    } else if (argv[1] == "loop"sv) {
+        print("pid=%d looping...", getpid());
+        do_loop();
+    } else if (argv[1] == "loop2"sv) {
+        print("pid=%d looping2...", getpid());
+        int i;
+        for (;;) {
+            i++;
+        }
+    } else if (argv[1] == "dumpregs"sv) {
+        if (argc != 3) return 1;
+        auto pid = (int) strtol(argv[2], nullptr, 0);
+        TracedProcess proc{};
+        proc.attach_and_wait(pid);
+        proc.dump_regs();
+        proc.detach();
     } else {
         print_usage();
         return 1;

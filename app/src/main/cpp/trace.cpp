@@ -26,13 +26,30 @@ bool TracedProcess::attach_and_wait(int pid) {
     return true;
 }
 
+bool TracedProcess::peek_memory(void *addr, unsigned long words[], size_t size) const {
+    for (auto i = 0; i < size; i++) {
+        words[i] = ptrace(PTRACE_PEEKDATA, pid_, ((unsigned long*) addr) + i, 0);
+    }
+    return true;
+}
+
+bool TracedProcess::poke_memory(void *addr, const unsigned long words[], size_t size) const {
+    for (auto i = 0; i < size; i++) {
+        if (ptrace(PTRACE_POKEDATA, pid_, ((unsigned long*) addr) + i, words[i]) == -1) {
+            perror("pokedata");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TracedProcess::get_regs() {
 #if defined(__x86_64__)
     if (ptrace(PTRACE_GETREGS, pid_, 0, &regs_) == -1) {
         return false;
     }
     return true;
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(__arm__)
 
     struct iovec iov = {
             .iov_base = &regs_,
@@ -59,7 +76,7 @@ bool TracedProcess::set_regs() {
         return false;
     }
     return true;
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(__arm__)
     struct iovec iov = {
             .iov_base = &regs_,
             .iov_len = sizeof(struct user_regs_struct),
@@ -75,22 +92,32 @@ bool TracedProcess::set_regs() {
 }
 
 #if defined(__x86_64__)
-const auto CODE_FOR_CALL = 0xccd0fflu; // call *%rax; int 3
-const auto CODE_FOR_SYSCALL = 0x050flu; // syscall
+const unsigned long CODE_FOR_CALL[] = { 0xccd0fflu }; // call *%rax; int 3
+const unsigned long CODE_FOR_SYSCALL[] = { 0x050flu }; // syscall
 const auto CALL_EXPECTED_OFFSET = 3;
 #define REG_FUNC_POINTER rax
 #define REG_SYSCALL_NR rax
 #define REG_RETVAL rax
 #define REG_SYSCALL_RETVAL rax
 #elif defined(__aarch64__)
-const auto CODE_FOR_CALL = 0xd4200020d63f0120lu; // blr x9; brk #0x1
-const auto CODE_FOR_SYSCALL = 0xd4000001lu; // svc 0
+const unsigned long CODE_FOR_CALL[] = { 0xd4200020d63f0120lu }; // blr x9; brk #0x1
+const unsigned long CODE_FOR_SYSCALL[] = { 0xd4000001lu }; // svc 0
 const auto CALL_EXPECTED_OFFSET = 4;
 #define REG_FUNC_POINTER regs[9]
 #define REG_SYSCALL_NR regs[8]
 #define REG_RETVAL regs[0]
 #define REG_SYSCALL_RETVAL regs[0]
-#else
+#elif defined(__arm__)
+// const unsigned long CODE_FOR_CALL[] = { 0x34ff2fe1lu, 0x700020e1lu }; // blx r4; bkpt #0
+const unsigned long CODE_FOR_CALL[] = { 0xbe0047a0lu }; // blx r4; bkpt #0
+// const unsigned long CODE_FOR_SYSCALL[] = { 0x000000eflu }; // svc 0
+const unsigned long CODE_FOR_SYSCALL[] = { 0xdf00lu }; // svc 0
+// const auto CALL_EXPECTED_OFFSET = 4;
+const auto CALL_EXPECTED_OFFSET = 2;
+#define REG_FUNC_POINTER uregs[4] // r4
+#define REG_SYSCALL_NR uregs[7] // r7
+#define REG_RETVAL uregs[0] // r0
+#define REG_SYSCALL_RETVAL uregs[0] // r0
 #endif
 
 bool TracedProcess::stack_push_str(const std::string_view &str, void* &addr) {
@@ -117,11 +144,13 @@ bool TracedProcess::stack_push_str(const std::string_view &str, void* &addr) {
 }
 
 bool TracedProcess::make_call(void* addr, void** result) {
-    auto orig_pc = regs_.REG_IP;
-    long instruction = ptrace(PTRACE_PEEKTEXT, pid_, orig_pc, nullptr);
-    print("pc=%p instruction: %lx", (void*) orig_pc, instruction);
-    if (ptrace(PTRACE_POKETEXT, pid_, regs_.REG_IP, CODE_FOR_CALL) == -1) {
-        perror("replace code");
+    auto orig_pc = (void*) regs_.REG_IP;
+    constexpr auto CODE_SIZE = sizeof(CODE_FOR_CALL) / sizeof(unsigned long);
+    print("pc=%p", orig_pc);
+    unsigned long instruction[CODE_SIZE];
+    peek_memory(orig_pc, instruction, CODE_SIZE);
+    if (!poke_memory(orig_pc, CODE_FOR_CALL, CODE_SIZE)) {
+        print("failed to replace code");
         return false;
     }
     regs_.REG_SP = regs_.REG_SP & (~0xf);
@@ -141,12 +170,12 @@ bool TracedProcess::make_call(void* addr, void** result) {
         perror("get regs post call");
         return false;
     }
-    if (regs_.REG_IP != orig_pc + CALL_EXPECTED_OFFSET) {
+    if (regs_.REG_IP != (unsigned long) orig_pc + CALL_EXPECTED_OFFSET) {
         print("break on wrong position pc=%lx", regs_.REG_IP);
         return false;
     }
-    if (ptrace(PTRACE_POKETEXT, pid_, orig_pc, instruction) == -1) {
-        perror("restore code");
+    if (!poke_memory(orig_pc, instruction, CODE_SIZE)) {
+        print("failed to restore code");
         return false;
     }
     if (result != nullptr)
@@ -185,6 +214,12 @@ bool TracedProcess::put_arg(int pos, void* arg) {
         return true;
     }
     return false;
+#elif defined(__arm__)
+    if (pos >= 1 && pos <= 4) {
+        regs_.uregs[pos - 1] = (unsigned long long) arg;
+        return true;
+    }
+    return false;
 #endif
 }
 
@@ -219,15 +254,27 @@ bool TracedProcess::put_syscall_arg(int pos, void* arg) {
         return true;
     }
     return false;
+#elif defined(__arm__)
+    if (pos >= 1 && pos <= 6) {
+        regs_.uregs[pos - 1] = (unsigned long long) arg;
+        return true;
+    }
+    return false;
 #endif
 }
 
 bool TracedProcess::make_syscall(int nr, void** result) {
-    auto orig_pc = regs_.REG_IP;
-    long instruction = ptrace(PTRACE_PEEKTEXT, pid_, orig_pc, nullptr);
-    print("pc=%p instruction: %lx", (void*) orig_pc, instruction);
-    if (ptrace(PTRACE_POKETEXT, pid_, regs_.REG_IP, CODE_FOR_SYSCALL) == -1) {
-        perror("replace code");
+    auto orig_pc = (void*) regs_.REG_IP;
+    constexpr auto CODE_SIZE = sizeof(CODE_FOR_SYSCALL) / sizeof(unsigned long);
+    print("pc=%p", orig_pc);
+#if defined(__arm__)
+    auto is_thumb = ARM_IS_THUMB(regs_);
+    print("is_thumb=%s", is_thumb ? "true" : "false");
+#endif
+    unsigned long instruction[CODE_SIZE];
+    peek_memory(orig_pc, instruction, CODE_SIZE);
+    if (!poke_memory(orig_pc, CODE_FOR_SYSCALL, CODE_SIZE)) {
+        print("failed to replace code");
         return false;
     }
     regs_.REG_SP = regs_.REG_SP & (~0xf);
@@ -246,8 +293,9 @@ bool TracedProcess::make_syscall(int nr, void** result) {
     if (!get_regs()) {
         return false;
     }
-    if (ptrace(PTRACE_POKETEXT, pid_, orig_pc, instruction) == -1) {
-        perror("restore code");
+    print("current pc: %lx", regs_.REG_IP);
+    if (!poke_memory(orig_pc, instruction, CODE_SIZE)) {
+        print("failed to restore code");
         return false;
     }
     if (result != nullptr)

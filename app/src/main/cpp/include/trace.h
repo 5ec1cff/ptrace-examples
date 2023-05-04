@@ -10,7 +10,9 @@
 #elif defined(__aarch64__)
 #define REG_SP sp
 #define REG_IP pc
-#else
+#elif defined(__arm__)
+#define REG_SP uregs[13]
+#define REG_IP uregs[15]
 #endif
 
 class TracedProcess {
@@ -20,6 +22,8 @@ private:
     struct user_regs_struct regs_backup_{};
 
     bool wait_internal(bool no_hang);
+    bool peek_memory(void *addr, unsigned long words[], size_t size) const;
+    bool poke_memory(void *addr, const unsigned long words[], size_t size) const;
 public:
     struct user_regs_struct regs_{};
 
