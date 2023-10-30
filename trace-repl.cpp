@@ -156,3 +156,23 @@ int main(int argc, char **argv) {
     auto pid = (int) strtol(argv[1], nullptr, 0);
     return trace_main(pid);
 }
+
+/**
+ * stop-before-seize:
+ * ./sleeper 0
+ * ./trace-repl pid
+ * w -> SIGSTOP + PTRACE_EVENT_STOP
+ * c 0 -> process continued during tracing (stop after detaching)
+ * k 18 -> send SIGCONT
+ *  c 0, w -> SIGTRAP + PTRACE_EVENT_STOP
+ *  (if SIGCONT is not blocked) c 0, w -> SIGCONT
+ *  c 0, w -> process continued correctly
+ *
+ * stop-after-seize:
+ * ./sleeper 5
+ * ./trace-repl pid
+ * <waiting for SIGSTOP>
+ * w -> SIGSTOP + SI_TKILL
+ * c 0 -> process continued correctly (SIGSTOP was suppressed)
+ * c 19 -> stop-before-seize
+ */
