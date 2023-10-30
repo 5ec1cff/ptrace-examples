@@ -11,7 +11,12 @@
 
 using namespace std;
 
+static bool is_signaled = false;
+
 static void sig_handler(int s) {
+    if (s == SIGCHLD) {
+        is_signaled = true;
+    }
 }
 
 void parse_signal(int status, int si_code) {
@@ -34,7 +39,13 @@ void parse_signal(int status, int si_code) {
 int trace_main(int pid) {
     struct sigaction act{};
     act.sa_handler = sig_handler;
-    sigaction(SIGINT, &act, 0);
+    if (sigaction(SIGINT, &act, 0) == -1) {
+        perror("sigaction SIGINT");
+    }
+    act.sa_flags = SA_RESTART;
+    if (sigaction(SIGCHLD, &act, 0) == -1) {
+        perror("sigaction SIGCHLD");
+    }
     if (ptrace(PTRACE_SEIZE, pid, 0, 0) == -1) {
         perror("seize");
         return 1;
@@ -113,6 +124,14 @@ int trace_main(int pid) {
                 } else si_code = siginfo.si_code;
                 parse_signal(status, si_code);
             }
+        } else if (cmd == "p") {
+            cout << (is_signaled ? "true" : "false") << endl;
+            is_signaled = false;
+        } else if (cmd == "k") {
+            int sig;
+            cin >> sig;
+            cout << "kill with signal " << sig << endl;
+            if (tgkill(pid, pid, sig) == -1) perror("tgkill");
         } else {
             cout << "invalid command " << cmd << endl;
         }
@@ -125,13 +144,15 @@ int main(int argc, char **argv) {
         return 1;
     }
     cout << "Command:" << endl;
-    cout << "  d: detach with signal and exit" << endl;
+    cout << "  d <sig>: detach with signal and exit" << endl;
     cout << "  i: interrupt" << endl;
     cout << "  l: listen" << endl;
     cout << "  w: wait (Ctrl-C to stop)" << endl;
-    cout << "  c: continue with signal <sig>" << endl;
+    cout << "  c <sig>: continue with signal <sig>" << endl;
     cout << "  W: wait not hang" << endl;
     cout << "  q: exit" << endl;
+    cout << "  p: peek SIGCHLD value" << endl;
+    cout << "  k <sig>: kill with signal" << endl;
     auto pid = (int) strtol(argv[1], nullptr, 0);
     return trace_main(pid);
 }
