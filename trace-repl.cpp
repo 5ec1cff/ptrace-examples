@@ -46,7 +46,7 @@ int trace_main(int pid) {
     if (sigaction(SIGCHLD, &act, 0) == -1) {
         perror("sigaction SIGCHLD");
     }
-    if (ptrace(PTRACE_SEIZE, pid, 0, 0) == -1) {
+    if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACEEXEC) == -1) {
         perror("seize");
         return 1;
     }
@@ -132,6 +132,44 @@ int trace_main(int pid) {
             cin >> sig;
             cout << "kill with signal " << sig << endl;
             if (tgkill(pid, pid, sig) == -1) perror("tgkill");
+        } else if (cmd == "C") {
+            cout << "continue if stopped" << endl;
+            int status;
+            auto wait_pid = waitpid(pid, &status, __WALL | WNOHANG);
+            if (wait_pid == -1) {
+                perror("wait");
+            } else if (wait_pid == 0) {
+                cout << "nothing to wait, maybe process is not stopped" << endl;
+            } else {
+                if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP && (status>>16 == PTRACE_EVENT_STOP)) {
+                    cout << "inject SIGCONT" << endl;
+                    if (tgkill(pid, pid, SIGCONT)) perror("tgkill cont");
+                    ptrace(PTRACE_CONT, pid, 0, 0);
+                    wait_pid = waitpid(pid, &status, __WALL);
+                    if (wait_pid == -1) perror("wait");
+                    if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP && (status>>16 == PTRACE_EVENT_STOP)) {
+                        cout << "trap c 0" << endl;
+                        ptrace(PTRACE_CONT, pid, 0, 0);
+                    } else {
+                        cout << "trap not received:" << WSTOPSIG(status) << endl;
+                        continue;
+                    }
+                    wait_pid = waitpid(pid, &status, __WALL);
+                    if (wait_pid == -1) perror("wait");
+                    if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGCONT) {
+                        cout << "cont c 0" << endl;
+                        ptrace(PTRACE_CONT, pid, 0, 0);
+                    }
+                } else {
+                    cout << "process is not stopped" << endl;
+                    siginfo_t siginfo;
+                    int si_code = 0;
+                    if (ptrace(PTRACE_GETSIGINFO, pid, 0, &siginfo) == -1) {
+                        perror("get siginfo");
+                    } else si_code = siginfo.si_code;
+                    parse_signal(status, si_code);
+                }
+            }
         } else {
             cout << "invalid command " << cmd << endl;
         }
@@ -153,6 +191,7 @@ int main(int argc, char **argv) {
     cout << "  q: exit" << endl;
     cout << "  p: peek SIGCHLD value" << endl;
     cout << "  k <sig>: kill with signal" << endl;
+    cout << "  C: continue process if stopped" << endl;
     auto pid = (int) strtol(argv[1], nullptr, 0);
     return trace_main(pid);
 }
@@ -175,4 +214,12 @@ int main(int argc, char **argv) {
  * w -> SIGSTOP + SI_TKILL
  * c 0 -> process continued correctly (SIGSTOP was suppressed)
  * c 19 -> stop-before-seize
+ *
+ * stop and detach after exec:
+ * ./sleeper 0 --exec
+ * ./trace-repl pid
+ * <waiting for SIGTRAP + PTRACE_EVENT_EXEC>
+ * k 19
+ * c 0, w -> SIGSTOP + SI_TKILL
+ * d 19 -> process is stopped and detached
  */
